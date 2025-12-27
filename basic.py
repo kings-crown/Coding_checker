@@ -148,6 +148,26 @@ class Usage:
         self.output_tokens += int(getattr(u, "output_tokens", 0) or 0)
 
 
+def debug_print_response(response):
+    print("\n=== RAW RESPONSE JSON ===")
+    print(response.model_dump_json(indent=2))
+
+    print("\n=== OUTPUT ITEMS ===")
+    for i, item in enumerate(response.output):
+        print(f"[{i}] type={item.type}")
+
+        if item.type == "function_call":
+            print(f"    name={item.name}")
+            print(f"    call_id={item.call_id}")
+            print(f"    arguments={item.arguments}")
+
+        elif item.type == "message":
+            # message.content is a list of content blocks (e.g., output_text)
+            for block in item.content:
+                if block.type == "output_text":
+                    print("    text:", block.text)
+
+
 def main() -> int:
     client = OpenAI()
     usage = Usage()
@@ -188,6 +208,9 @@ def main() -> int:
                 input=input_items,
             )
             usage.add_from_response(response)
+
+            # debug_print_response(response)
+
 
             input_items += response.output
 
