@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use Coding_checker in your research or project, please cite it using this metadata."
+type: software
+title: "AI Coding Agent for Large Rust Codebases with a Checker"
+abstract: "Minimal CLIs that steer an LLMs via API calls to edit code inside a sandboxed ./workspace directory, with Python-only and Rust+Kani flows."
+authors:
+  - family-names: "Rao"
+    given-names: "Balaji"
+    email: "balaji.vir1997@outlook.com"
+    orcid: "https://orcid.org/0000-0002-0641-0575"  
+repository-code: "https://github.com/kings-crown/Coding_checker"
+#url: "https://github.com/<org-or-user>/Coding_checker" # or project website if you have one
+license: MIT 
+version: 0.1.0
+date-released: "2025-12-28" # YYYY-MM-DD; match your release date
+keywords:
+  - ai-coding-agent
+  - code-editing
+  - formal-verification
+  - kani-verifier
+  - code-sandbox
+  - rust
+  - kani
+  - sandbox
+references:
+  - type: documentation
+    title: "Project README"
+    url: "https://github.com/kings-crown/Coding_checker/blob/main/README.md"
