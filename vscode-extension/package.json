@@ -1,0 +1,24 @@
+{
+  "name": "coding-checker-ui",
+  "displayName": "Coding Checker UI",
+  "description": "Opens the Coding Checker patch/diff UI inside VS Code when basic_rust.py runs.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "main": "extension.js",
+  "activationEvents": [
+    "workspaceContains:basic_rust.py",
+    "workspaceContains:Coding_checker/basic_rust.py",
+    "onCommand:codingChecker.openPatchUI"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "codingChecker.openPatchUI",
+        "title": "Coding Checker: Open Latest Diff"
+      }
+    ]
+  }
+}

@@ -1,1 +1,10 @@
 workspace
+*.log
+.DS_Store
+node_modules/
+dist/
+.env
+.vscode/
+.idea/
+*.ui.
+.coding_checker
