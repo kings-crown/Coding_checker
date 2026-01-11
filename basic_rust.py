@@ -21,6 +21,9 @@ DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 WORKSPACE = Path(os.getenv("CODE_WRITER_WORKSPACE", "./workspace")).resolve()
 WORKSPACE.mkdir(parents=True, exist_ok=True)
 
+RUN_ROOT = Path(os.getenv("CODE_WRITER_RUN_ROOT", Path(__file__).resolve().parent / "runs"))
+RUN_ROOT.mkdir(parents=True, exist_ok=True)
+
 MAX_BYTES = int(os.getenv("CODE_WRITER_MAX_BYTES", "200000"))  # cap per write
 MAX_AGENT_TURNS = int(os.getenv("CODE_WRITER_MAX_AGENT_TURNS", "15"))
 MAX_KANI_TRIES = int(os.getenv("CODE_WRITER_MAX_KANI_TRIES", "3"))
@@ -29,6 +32,8 @@ KANI_DOCKER_IMAGE = os.getenv("KANI_DOCKER_IMAGE", "kani-runner:0.66")
 KANI_TIMEOUT_SECS = int(os.getenv("KANI_TIMEOUT_SECS", "300"))
 
 ALLOWED_SUFFIXES = {".py", ".rs", ".toml", ".lock", ".md", ".txt"}
+
+REQUIRE_APPROVAL = True  # explicit user "Yes" applies the last proposed patch
 
 _ALLOWED_KANI_ARGS = {
     "--quiet",
@@ -43,6 +48,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 UI_SIGNAL_DIR = SCRIPT_DIR / ".coding_checker"
 UI_SIGNAL_FILE = UI_SIGNAL_DIR / "ui.signal.json"
 UI_SIGNAL_MAX_BYTES = int(os.getenv("CODE_WRITER_UI_SIGNAL_MAX_BYTES", "400000"))
+
+RUN_DIR: Optional[Path] = None
+PATCH_COUNTER = 0
+LAST_PATCH_PATH: Optional[Path] = None
 
 
 # -------------------- path safety helpers --------------------
@@ -110,6 +119,28 @@ def _truncate_signal_text(text: str, max_bytes: int) -> str:
     return clipped + "\n...[truncated]\n"
 
 
+def _ensure_run_dir() -> Path:
+    global RUN_DIR
+    if RUN_DIR is not None:
+        return RUN_DIR
+    tag_env = os.getenv("CODE_WRITER_RUN_TAG")
+    ts = int(time.time())
+    day_date = time.strftime("%a-%Y%m%d")
+    slug = f"{day_date}-{ts}"
+    if tag_env:
+        slug = f"{slug}-{tag_env}"
+    RUN_DIR = RUN_ROOT / f"run-{slug}"
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    (RUN_DIR / "patches").mkdir(parents=True, exist_ok=True)
+    return RUN_DIR
+
+
+def _next_patch_id() -> int:
+    global PATCH_COUNTER
+    PATCH_COUNTER += 1
+    return PATCH_COUNTER
+
+
 def write_ui_signal(payload: Dict[str, Any]) -> None:
     try:
         if not (os.getenv("VSCODE_PID") or os.getenv("TERM_PROGRAM") == "vscode"):
@@ -145,6 +176,12 @@ def write_file(path: str, content: str, overwrite: bool = False) -> str:
         if fp.exists():
             before = fp.read_text(encoding="utf-8")
 
+        if fp.exists() and REQUIRE_APPROVAL:
+            return json.dumps({
+                "ok": False,
+                "error": "File exists. Use propose_patch + approval instead of write_file.",
+                "path": path,
+            })
         if fp.exists() and not overwrite:
             return json.dumps({"ok": False, "error": "File exists; set overwrite=true.", "path": path})
 
@@ -308,6 +345,112 @@ def run_kani(project_dir: str, args: Optional[List[str]] = None) -> str:
 
 # -------------------- tool definitions --------------------
 
+def _paths_from_diff(diff_text: str) -> List[Path]:
+    files: List[Path] = []
+    for line in diff_text.splitlines():
+        if line.startswith("+++ "):
+            part = line[4:].strip()
+            # strip prefixes a/ b/
+            if part.startswith("a/") or part.startswith("b/"):
+                part = part[2:]
+            try:
+                p = _safe_ws_path(part)
+            except Exception:
+                continue
+            if p not in files:
+                files.append(p)
+    return files
+
+
+def propose_patch(diff: str) -> str:
+    try:
+        run_dir = _ensure_run_dir()
+        patch_id = _next_patch_id()
+        patch_path = run_dir / "patches" / f"patch-{patch_id:04d}.diff"
+        patch_path.write_text(diff, encoding="utf-8")
+        global LAST_PATCH_PATH
+        LAST_PATCH_PATH = patch_path
+        return json.dumps({
+            "ok": True,
+            "patch_id": patch_id,
+            "path": str(patch_path),
+            "message": "Patch recorded. User must reply 'Yes' to apply the last patch.",
+        })
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)})
+
+
+def apply_patch_file(patch_path: Path) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"ok": False, "path": str(patch_path)}
+    if not patch_path.exists():
+        result["error"] = "Patch file not found"
+        return result
+
+    diff_text = patch_path.read_text(encoding="utf-8")
+    touched = _paths_from_diff(diff_text)
+    before: Dict[Path, str] = {}
+    for p in touched:
+        if p.exists():
+            before[p] = p.read_text(encoding="utf-8")
+        else:
+            before[p] = ""
+
+    run_dir = _ensure_run_dir()
+    apply_out = patch_path.with_suffix(".apply.out")
+    apply_err = patch_path.with_suffix(".apply.err")
+
+    def _run(cmd: List[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            cmd,
+            cwd=WORKSPACE,
+            text=True,
+            input=None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    check = _run(["git", "apply", "--check", str(patch_path)])
+    apply_out.write_text(check.stdout, encoding="utf-8")
+    apply_err.write_text(check.stderr, encoding="utf-8")
+    if check.returncode != 0:
+        result.update({
+            "ok": False,
+            "error": "git apply --check failed",
+            "stderr": check.stderr,
+        })
+        return result
+
+    apply = _run(["git", "apply", str(patch_path)])
+    apply_out.write_text(apply_out.read_text(encoding="utf-8") + apply.stdout, encoding="utf-8")
+    apply_err.write_text(apply_err.read_text(encoding="utf-8") + apply.stderr, encoding="utf-8")
+    if apply.returncode != 0:
+        result.update({
+            "ok": False,
+            "error": "git apply failed",
+            "stderr": apply.stderr,
+        })
+        return result
+
+    after_info: List[Dict[str, str]] = []
+    for p in touched:
+        after = p.read_text(encoding="utf-8") if p.exists() else ""
+        after_info.append({"path": str(p), "bytes": len(after.encode("utf-8"))})
+        write_ui_signal({
+            "event": "file_diff",
+            "path": str(p.relative_to(WORKSPACE)),
+            "abs_path": str(p),
+            "before": _truncate_signal_text(before.get(p, ""), UI_SIGNAL_MAX_BYTES),
+            "after": _truncate_signal_text(after, UI_SIGNAL_MAX_BYTES),
+        })
+
+    result.update({
+        "ok": True,
+        "applied": True,
+        "files": after_info,
+    })
+    return result
+
+
 TOOLS = [
     {
         "type": "function",
@@ -325,7 +468,7 @@ TOOLS = [
     {
         "type": "function",
         "name": "write_file",
-        "description": "Write a file under local ./workspace. Does NOT execute code.",
+        "description": "Write a file under local ./workspace. Intended for new files; existing files require propose_patch + user approval.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -334,6 +477,19 @@ TOOLS = [
                 "overwrite": {"type": "boolean", "description": "Overwrite if file exists (default false)"},
             },
             "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
+        "name": "propose_patch",
+        "description": "Propose a unified diff patch. The user must reply 'Yes' to apply the last patch. Do NOT apply yourself.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "diff": {"type": "string", "description": "Unified diff to apply relative to workspace root."},
+            },
+            "required": ["diff"],
             "additionalProperties": False,
         },
     },
@@ -378,6 +534,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> str:
             content=str(args["content"]),
             overwrite=bool(args.get("overwrite", False)),
         )
+    if name == "propose_patch":
+        return propose_patch(diff=str(args["diff"]))
     if name == "init_rust_crate":
         return init_rust_crate(
             project_dir=str(args["project_dir"]),
@@ -425,8 +583,10 @@ def debug_print_response(response: Any) -> None:
 
 
 def main() -> int:
+    global LAST_PATCH_PATH
     client = OpenAI()
     usage = Usage()
+    run_dir = _ensure_run_dir()
 
     instructions = (
         "You are a Rust coding assistant.\n"
@@ -436,15 +596,16 @@ def main() -> int:
         f"You have at most {MAX_KANI_TRIES} total run_kani attempts per user request.\n"
         "Workflow you MUST follow:\n"
         "0) Call init_rust_crate(project_dir=...) before writing Rust files.\n"
-        "1) Write/modify Rust code + Kani proof harnesses.\n"
-        "2) Call run_kani.\n"
-        "3) If verification fails, use the failure output to fix the code/harness/spec and re-run.\n"
-        "4) Stop when run_kani returns passed=true, then explain what you changed and what is proven.\n"
-        "When you write files, always use write_file with full file contents.\n"
+        "1) For existing files, propose unified diffs via propose_patch. Do NOT apply patches; wait for user approval.\n"
+        "2) For brand-new files, you may use write_file (if file does not yet exist).\n"
+        "3) After code changes are applied, call run_kani.\n"
+        "4) If verification fails, use the failure output to fix the code/harness/spec and re-run.\n"
+        "5) Stop when run_kani returns passed=true, then explain what you changed and what is proven.\n"
         "When calling run_kani, pass project_dir like 'demo' (NOT 'workspace/demo').\n"
     )
 
     input_items: List[Dict[str, Any]] = []
+    print(f"Run dir: {run_dir}")
 
     print(f"Workspace: {WORKSPACE}")
     print("Type '/clear' to reset, 'exit' to quit.\n")
@@ -459,6 +620,20 @@ def main() -> int:
             input_items = []
             usage = Usage()
             print("(cleared)\n")
+            continue
+        if user.lower() == "yes":
+            if LAST_PATCH_PATH is None:
+                print("No pending patch to apply.\n")
+                continue
+            print(f"Applying last patch: {LAST_PATCH_PATH}")
+            apply_res = apply_patch_file(LAST_PATCH_PATH)
+            print(json.dumps(apply_res, indent=2))
+            if apply_res.get("ok"):
+                LAST_PATCH_PATH = None
+            input_items.append({
+                "role": "assistant",
+                "content": f"Patch applied: {json.dumps(apply_res)}",
+            })
             continue
 
         input_items.append({"role": "user", "content": user})
