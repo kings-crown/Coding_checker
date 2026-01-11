@@ -1,8 +1,9 @@
 # AI Coding Agent for Large TypeScript/Rust Codebases with a Checker
 
-Minimal CLIs that steer an OpenAI model to edit code inside a sandboxed `./workspace` directory. Includes:
+Minimal CLIs that steer an OpenAI model to edit code inside a sandboxed `./workspace` directory. Now modularized:
 - `basic.py` for a Python-only flow.
-- `basic_rust.py` for Rust + Kani verification (uses Docker).
+- `basic_rust.py` for Rust + Kani verification (uses Docker), built on modules:
+  - `config.py`, `paths.py`, `ui_signal.py`, `files.py`, `patches.py`, `kani.py`
 
 ## Requirements
 - Python 3.10+
@@ -21,6 +22,7 @@ Minimal CLIs that steer an OpenAI model to edit code inside a sandboxed `./works
 - Existing files: require `propose_patch` + approval. New files: allowed via `write_file`.
 - Patch application uses `git apply --check` then `git apply`; failures are surfaced to the REPL.
 - After a successful apply, the agent emits `.coding_checker/ui.signal.json` events so the VS Code extension opens before/after diffs automatically.
+- Invalid patches are rejected before approval (preview/dry-run git apply); `Yes` only applies a validated patch.
 
 ## Run directory layout
 - Each run creates `runs/run-<Day-YYYYMMDD>-<unix>[-<tag>]` (tag set via `CODE_WRITER_RUN_TAG`).
@@ -32,3 +34,4 @@ Minimal CLIs that steer an OpenAI model to edit code inside a sandboxed `./works
 2) Prompt it to edit an existing file (e.g., tweak a comment in `workspace/demo/src/lib.rs`); it should call `propose_patch` and print the patch path.
 3) Type `Yes` in the REPL to apply; confirm the VS Code diff opens and the file is updated.
 4) For a new file, ask it to create one; it should use `write_file` and succeed without approval.
+
